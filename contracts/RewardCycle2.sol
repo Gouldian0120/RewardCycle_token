@@ -1,6 +1,3 @@
-/**
- *Submitted for verification at BscScan.com on 2021-09-04
-*/
 
 // Dependency file: @openzeppelin/contracts/utils/Context.sol
 
@@ -19,7 +16,7 @@
  * This contract is only required for intermediate, library-like contracts.
  */
 abstract contract Context {
-    function _msgSender() internal view virtual returns (address payable) {
+    function _msgSender() internal view virtual returns (address) {
         return msg.sender;
     }
 
@@ -885,7 +882,7 @@ abstract contract ContextUpgradeable is Initializable {
 
     function __Context_init_unchained() internal initializer {
     }
-    function _msgSender() internal view virtual returns (address payable) {
+    function _msgSender() internal view virtual returns (address) {
         return msg.sender;
     }
 
@@ -2206,19 +2203,22 @@ interface IPinkAntiBot {
 }
 
 
-// Dependency file: contracts/interfaces/IAntiBotBabyToken.sol
+// Dependency file: contracts/interfaces/IRewardCycleToken.sol
 
 // pragma solidity >=0.5.0;
 
 interface IRewardCycleToken {
   function initialize(
-    address[5] memory addrs, // [0] = owner, [1] = rewardToken, [2] = router, [3] = marketing wallet, [4] = anti bot
+    address[6] memory addrs, // [0] = owner, [1] = rewardToken, [2] = router, [3] = marketing wallet, [4] = anti bot, [5] = dev wallet
     string memory name_,
     string memory symbol_,
     uint256 totalSupply_,
     uint256 tokenRewardsFee_,
+    uint256 tokenRewardsFeeByBUSD_,
     uint256 liquidityFee_,
     uint256 marketingFee_,
+    uint256 devFee_,
+    uint256 burnFee_,
     uint256 minimumTokenBalanceForDividends_
   ) external;
 }
@@ -2227,7 +2227,7 @@ interface IRewardCycleToken {
 // Root file: contracts/tokens/AntiBotBabyToken.sol
 
 
-pragma solidity ^0.7.6;
+pragma solidity ^0.8.0;
 
 // import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 // import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
@@ -2308,6 +2308,7 @@ contract DividendPayingToken is
 
   address public rewardToken;
 
+
   // With `magnitude`, we can properly distribute dividends even if the amount of received ether is small.
   // For more discussion about choosing the value of `magnitude`,
   //  see https://github.com/ethereum/EIPs/issues/1726#issuecomment-472352728
@@ -2357,7 +2358,7 @@ contract DividendPayingToken is
   /// @notice Withdraws the ether distributed to the sender.
   /// @dev It emits a `DividendWithdrawn` event if the amount of withdrawn ether is greater than 0.
   function withdrawDividend() public virtual override {
-    _withdrawDividendOfUser(msg.sender);
+    _withdrawDividendOfUser(payable(msg.sender));
   }
 
   /// @notice Withdraws the ether distributed to the sender.
@@ -2367,6 +2368,7 @@ contract DividendPayingToken is
     if (_withdrawableDividend > 0) {
       withdrawnDividends[user] = withdrawnDividends[user].add(_withdrawableDividend);
       emit DividendWithdrawn(user, _withdrawableDividend);
+      
       bool success = IERC20(rewardToken).transfer(user, _withdrawableDividend);
 
       if (!success) {
@@ -2478,26 +2480,26 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
   bool private swapping;
 
   address public immutable implementation;
+  address public immutable implementationByBUSD;
   RewardCycleDividendTracker public dividendTracker;
-  RewardCycleDividendTracker public dividendTrackerByEth;
+  RewardCycleDividendTracker public dividendTrackerByBUSD;
 
   address public rewardToken;
-
+  address public immutable BUSD = address(0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56);
   uint256 public swapTokensAtAmount;
 
   mapping(address => bool) public _isBlacklisted;
 
   uint256 public tokenRewardsFee;           // 2% for RC1
-  uint256 public tokenRewardsFeeByEth;      // 5% for BNB
+  uint256 public tokenRewardsFeeByBUSD;     // 5% for BNB
   uint256 public liquidityFee;              // 3%
   uint256 public marketingFee;              // 4%
-  uint256 public developerFee;              // 1%
+  uint256 public devFee;                    // 1%
   uint256 public burnFee;                   // 1%
   uint256 public totalFees;                 // 16%
 
   address public _marketingWalletAddress;
   address public _devWalletAddress;
-  address public _burnAddress;
 
   // use by default 300,000 gas to process auto-claiming dividends
   uint256 public gasForProcessing = 300000;
@@ -2529,10 +2531,11 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
   event GasForProcessingUpdated(uint256 indexed newValue, uint256 indexed oldValue);
 
   event SwapAndLiquify(uint256 tokensSwapped, uint256 ethReceived, uint256 tokensIntoLiqudity);
+  event SendBNBFee(uint256 tokensSwapped, uint256 amount);
 
   event SendDividends(uint256 tokensSwapped, uint256 amount);
 
-  event SendDividendsByEth(uint256 tokensSwapped, uint256 amount);
+  event SendDividendsByBUSD(uint256 tokensSwapped, uint256 amount);
 
   event ProcessedDividendTracker(
     uint256 iterations,
@@ -2545,15 +2548,16 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
 
   constructor() {
     implementation = address(new RewardCycleDividendTracker());
+    implementationByBUSD = address(new RewardCycleDividendTracker());
   }
 
   function initialize(
-    address[7] memory addrs, // [0] = owner, [1] = rewardToken, [2] = router, [3] = marketing wallet, [5] = dev wallet, [6] = burn address
+    address[6] memory addrs, // [0] = owner, [1] = rewardToken, [2] = router, [3] = marketing wallet, [5] = dev wallet
     string memory name_,
     string memory symbol_,
     uint256 totalSupply_,
     uint256 tokenRewardsFee_,
-    uint256 tokenRewardsFeeByEth_,
+    uint256 tokenRewardsFeeByBUSD_,
     uint256 liquidityFee_,
     uint256 marketingFee_,
     uint256 devFee_,
@@ -2564,25 +2568,21 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
     require(addrs[0] != addrs[5], "Owner and developer wallet cannot be the same");
     __ERC20_init(name_, symbol_);
     __Ownable_init();
+    
     pinkAntiBot = IPinkAntiBot(addrs[4]);
     pinkAntiBot.setTokenOwner(addrs[0]);
     enableAntiBot = true;
+    
     rewardToken = addrs[1];
     tokenRewardsFee = tokenRewardsFee_;
-    tokenRewardsFeeByEth = tokenRewardsFeeByEth_;
+    tokenRewardsFeeByBUSD = tokenRewardsFeeByBUSD_;
     liquidityFee = liquidityFee_;
     marketingFee = marketingFee_;
     devFee = devFee_;
     burnFee = burnFee_;
-    totalFees = tokenRewardsFee.add(tokenRewardsFeeByEth_).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
+    totalFees = tokenRewardsFee.add(tokenRewardsFeeByBUSD_).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
     require(totalFees <= 100, "Total fee is over 100%");
     swapTokensAtAmount = totalSupply_.mul(2).div(10**6); // 0.002%
-
-    dividendTracker = RewardCycleDividendTracker(payable(Clones.clone(implementation)));
-    dividendTracker.initialize(rewardToken, minimumTokenBalanceForDividends_);
-
-    dividendTrackerByEth = RewardCycleDividendTracker(payable(Clones.clone(implementation)));
-    dividendTrackerByEth.initialize(WETH, minimumTokenBalanceForDividends_);
 
     IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(addrs[2]);
     // Create a uniswap pair for this new token
@@ -2592,32 +2592,37 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
     );
     uniswapV2Router = _uniswapV2Router;
     uniswapV2Pair = _uniswapV2Pair;
-    _setAutomatedMarketMakerPair(_uniswapV2Pair, true);
 
-    _marketingWalletAddress = addrs[3];
-    _devWalletAddress = addrs[5];
-    _burnAddress = addrs[6];
+    dividendTracker = RewardCycleDividendTracker(payable(Clones.clone(implementation)));
+    dividendTracker.initialize(rewardToken, minimumTokenBalanceForDividends_);
+
+    dividendTrackerByBUSD = RewardCycleDividendTracker(payable(Clones.clone(implementationByBUSD)));
+    dividendTrackerByBUSD.initialize(BUSD, minimumTokenBalanceForDividends_);
 
     // exclude from receiving dividends
     dividendTracker.excludeFromDividends(address(dividendTracker));
-    dividendTracker.excludeFromDividends(address(dividendTrackerByEth));
+    dividendTracker.excludeFromDividends(address(dividendTrackerByBUSD));
     dividendTracker.excludeFromDividends(address(this));
     dividendTracker.excludeFromDividends(addrs[0]);
     dividendTracker.excludeFromDividends(address(0xdead));
     dividendTracker.excludeFromDividends(address(_uniswapV2Router));
 
-    dividendTrackerByEth.excludeFromDividends(address(dividendTracker));
-    dividendTrackerByEth.excludeFromDividends(address(dividendTrackerByEth));
-    dividendTrackerByEth.excludeFromDividends(address(this));
-    dividendTrackerByEth.excludeFromDividends(addrs[0]);
-    dividendTrackerByEth.excludeFromDividends(address(0xdead));
-    dividendTrackerByEth.excludeFromDividends(address(_uniswapV2Router));
+    dividendTrackerByBUSD.excludeFromDividends(address(dividendTracker));
+    dividendTrackerByBUSD.excludeFromDividends(address(dividendTrackerByBUSD));
+    dividendTrackerByBUSD.excludeFromDividends(address(this));
+    dividendTrackerByBUSD.excludeFromDividends(addrs[0]);
+    dividendTrackerByBUSD.excludeFromDividends(address(0xdead));
+    dividendTrackerByBUSD.excludeFromDividends(address(_uniswapV2Router));
+
+    _setAutomatedMarketMakerPair(_uniswapV2Pair, true);
+
+    _marketingWalletAddress = addrs[3];
+    _devWalletAddress = addrs[5];
 
     // exclude from paying fees or having max transaction amount
     excludeFromFees(addrs[0], true);
     excludeFromFees(_marketingWalletAddress, true);
     excludeFromFees(_devWalletAddress, true);
-    excludeFromFees(_burnAddress, true);
     excludeFromFees(address(this), true);
     /*
             _mint is an internal function in ERC20.sol that is only called here,
@@ -2637,14 +2642,14 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
     swapTokensAtAmount = amount;
   }
 
-  function updateDividendTracker(address newAddress, bool bEth) public onlyOwner {
+  function updateDividendTracker(address newAddress, bool bBUSD) public onlyOwner {
     require(
-      !bEth && newAddress != address(dividendTracker),
+      !bBUSD && newAddress != address(dividendTracker),
       "RewardCycleToken: The dividend tracker already has that address"
     );
 
     require(
-      bEth && newAddress != address(dividendTrackerByEth),
+      bBUSD && newAddress != address(dividendTrackerByBUSD),
       "RewardCycleToken: The dividendbyEth tracker already has that address"
     );
 
@@ -2662,10 +2667,10 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
 
     emit UpdateDividendTracker(newAddress, address(dividendTracker));
 
-    if (!bEth)
+    if (!bBUSD)
         dividendTracker = newDividendTracker;
     else
-        dividendTrackerByEth = newDividendTracker;
+        dividendTrackerByBUSD = newDividendTracker;
   }
 
   function updateUniswapV2Router(address newAddress) public onlyOwner {
@@ -2713,32 +2718,32 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
 
   function setTokenRewardsFee(uint256 value) external onlyOwner {
     tokenRewardsFee = value;
-    totalFees = tokenRewardsFee.add(tokenRewardsFeeByEth).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
+    totalFees = tokenRewardsFee.add(tokenRewardsFeeByBUSD).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
   }
 
-  function setTokenRewardsFeeByEth(uint256 value) external onlyOwner {
-    tokenRewardsFeeByEth = value;
-    totalFees = tokenRewardsFee.add(tokenRewardsFeeByEth).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
+  function settokenRewardsFeeByBUSD(uint256 value) external onlyOwner {
+    tokenRewardsFeeByBUSD = value;
+    totalFees = tokenRewardsFee.add(tokenRewardsFeeByBUSD).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
   }
 
   function setLiquiditFee(uint256 value) external onlyOwner {
     liquidityFee = value;
-    totalFees = tokenRewardsFee.add(tokenRewardsFeeByEth).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
+    totalFees = tokenRewardsFee.add(tokenRewardsFeeByBUSD).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
   }
 
   function setMarketingFee(uint256 value) external onlyOwner {
     marketingFee = value;
-    totalFees = tokenRewardsFee.add(tokenRewardsFeeByEth).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
+    totalFees = tokenRewardsFee.add(tokenRewardsFeeByBUSD).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
   }
 
   function setDevFee(uint256 value) external onlyOwner {
     devFee = value;
-    totalFees = tokenRewardsFee.add(tokenRewardsFeeByEth).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
+    totalFees = tokenRewardsFee.add(tokenRewardsFeeByBUSD).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
   }
 
   function setBurnFee(uint256 value) external onlyOwner {
     burnFee = value;
-    totalFees = tokenRewardsFee.add(tokenRewardsFeeByEth).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
+    totalFees = tokenRewardsFee.add(tokenRewardsFeeByBUSD).add(liquidityFee).add(marketingFee).add(devFee).add(burnFee);
   }
 
   function setAutomatedMarketMakerPair(address pair, bool value) public onlyOwner {
@@ -2763,7 +2768,7 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
 
     if (value) {
       dividendTracker.excludeFromDividends(pair);
-      dividendTrackerByEth.excludeFromDividends(pair);
+      dividendTrackerByBUSD.excludeFromDividends(pair);
     }
 
     emit SetAutomatedMarketMakerPair(pair, value);
@@ -2786,49 +2791,49 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
     if (!bEth)
         dividendTracker.updateClaimWait(claimWait);
     else
-        dividendTrackerByEth.updateClaimWait(claimWait);
+        dividendTrackerByBUSD.updateClaimWait(claimWait);
   }
 
   function getClaimWait(bool bEth) external view returns (uint256) {
     if (!bEth)
         return dividendTracker.claimWait();
     else
-        return dividendTrackerByEth.claimWait();
+        return dividendTrackerByBUSD.claimWait();
   }
 
   function getTotalDividendsDistributed(bool bEth) external view returns (uint256) {
     if (!bEth)
         return dividendTracker.totalDividendsDistributed();
     else
-        return dividendTrackerByEth.totalDividendsDistributed();
+        return dividendTrackerByBUSD.totalDividendsDistributed();
   }
 
   function isExcludedFromFees(address account) public view returns (bool) {
     return _isExcludedFromFees[account];
   }
 
-  function withdrawableDividendOf(address account, bool bEth) public view returns (uint256) {
-    if (!bEth)
+  function withdrawableDividendOf(address account, bool bBUSD) public view returns (uint256) {
+    if (!bBUSD)
         return dividendTracker.withdrawableDividendOf(account);
     else
-        return dividendTrackerByEth.withdrawableDividendOf(account);
+        return dividendTrackerByBUSD.withdrawableDividendOf(account);
   }
 
-  function dividendTokenBalanceOf(address account, bool bEth) public view returns (uint256) {
-    if (!bEth)
+  function dividendTokenBalanceOf(address account, bool bBUSD) public view returns (uint256) {
+    if (!bBUSD)
         return dividendTracker.balanceOf(account);
     else
-        return dividendTrackerByEth.balanceOf(account);
+        return dividendTrackerByBUSD.balanceOf(account);
   }
 
-  function excludeFromDividends(address account, bool bEth) external onlyOwner {
-    if (!bEth)
+  function excludeFromDividends(address account, bool bBUSD) external onlyOwner {
+    if (!bBUSD)
         dividendTracker.excludeFromDividends(account);
     else
-        dividendTrackerByEth.excludeFromDividends(account);
+        dividendTrackerByBUSD.excludeFromDividends(account);
   }
 
-  function getAccountDividendsInfo(address account, bool bEth)
+  function getAccountDividendsInfo(address account, bool bBUSD)
     external
     view
     returns (
@@ -2842,13 +2847,13 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
       uint256
     )
   {
-    if (!bEth)
+    if (!bBUSD)
         return dividendTracker.getAccount(account);
     else
-        return dividendTrackerByEth.getAccount(account);
+        return dividendTrackerByBUSD.getAccount(account);
   }
 
-  function getAccountDividendsInfoAtIndex(uint256 index, bool bEth)
+  function getAccountDividendsInfoAtIndex(uint256 index, bool bBUSD)
     external
     view
     returns (
@@ -2862,44 +2867,56 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
       uint256
     )
   {
-    if (!bEth)
+    if (!bBUSD)
         return dividendTracker.getAccountAtIndex(index);
     else
-        return dividendTrackerByEth.getAccountAtIndex(index);
+        return dividendTrackerByBUSD.getAccountAtIndex(index);
   }
 
-  function processDividendTracker(uint256 gas, bool bEth) external {
-    if (!bEth)
+  function processDividendTracker(uint256 gas, bool bBUSD) external {
+    if (!bBUSD)
+    {
         (uint256 iterations, uint256 claims, uint256 lastProcessedIndex) = dividendTracker.process(gas);
+        emit ProcessedDividendTracker(iterations, claims, lastProcessedIndex, false, gas, tx.origin);
+    }
     else
-        (uint256 iterations, uint256 claims, uint256 lastProcessedIndex) = dividendTrackerByEth.process(gas);
-
-    emit ProcessedDividendTracker(iterations, claims, lastProcessedIndex, false, gas, tx.origin);
+    {
+        (uint256 iterations, uint256 claims, uint256 lastProcessedIndex) = dividendTrackerByBUSD.process(gas);
+        emit ProcessedDividendTracker(iterations, claims, lastProcessedIndex, false, gas, tx.origin);
+    }
   }
 
-  function claim(bool bEth) external {
-    if (!bEth)
-        dividendTracker.processAccount(msg.sender, false);
+  function claim(bool bBUSD) external {
+    if (!bBUSD)
+    {
+        dividendTracker.processAccount(payable(msg.sender), false);
+    }
     else
-        dividendTrackerByEth.processAccount(msg.sender, false);
+    {
+        dividendTrackerByBUSD.processAccount(payable(msg.sender), false);
+    }
   }
 
-  function getLastProcessedIndex(bool bEth) external view returns (uint256) {
-    if (!bEth)
+  function getLastProcessedIndex(bool bBUSD) external view returns (uint256) {
+    if (!bBUSD)
+    {
         return dividendTracker.getLastProcessedIndex();
+    }
     else
-        return dividendTrackerByEth.getLastProcessedIndex();
+    {
+        return dividendTrackerByBUSD.getLastProcessedIndex();
+    }
   }
 
-  function getNumberOfDividendTokenHolders(bool bEth) external view returns (uint256) {
-    if (!bEth)
+  function getNumberOfDividendTokenHolders(bool bBUSD) external view returns (uint256) {
+    if (!bBUSD)
+    {
         return dividendTracker.getNumberOfTokenHolders();
+    }
     else
-        return dividendTrackerByEth.getNumberOfTokenHolders();
-  }
-
-  function burn(uint256 tBurn) internal {
-    super._transfer(_msgSender(), _burnAddress, tBurn);
+    {
+        return dividendTrackerByBUSD.getNumberOfTokenHolders();
+    }
   }
 
   function _transfer(
@@ -2937,7 +2954,7 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
       swapAndSendToFee(devTokens, _devWalletAddress);
 
       uint256 burnTokens = contractTokenBalance.mul(burnFee).div(totalFees);
-      burn(burnTokens);
+      _burn(address(this), burnTokens);
 
       uint256 swapTokens = contractTokenBalance.mul(liquidityFee).div(totalFees);
       swapAndLiquify(swapTokens);
@@ -2946,7 +2963,7 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
       swapAndSendDividends(sellTokens);
 
       uint256 sellTokensByEth = balanceOf(address(this));
-      swapAndSendDividendsByEth(sellTokensByEth);
+      swapAndSendDividendsByBUSD(sellTokensByEth);
 
       swapping = false;
     }
@@ -2958,15 +2975,13 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
       takeFee = false;
     }
 
-    if (from == uniswapV2Pair) {
-      takeFee = false;
-    }
-
     if (takeFee) {
       uint256 fees = amount.mul(totalFees).div(100);
-      if (automatedMarketMakerPairs[to]) {
+/*
+      if (automatedMarketMakerPairs[to]) {              // sell token
         fees += amount.mul(1).div(100);
       }
+*/
       amount = amount.sub(fees);
 
       super._transfer(from, address(this), fees);
@@ -2977,8 +2992,8 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
     try dividendTracker.setBalance(payable(from), balanceOf(from)) {} catch {}
     try dividendTracker.setBalance(payable(to), balanceOf(to)) {} catch {}
 
-    try dividendTrackerByEth.setBalance(payable(from), balanceOf(from)) {} catch {}
-    try dividendTrackerByEth.setBalance(payable(to), balanceOf(to)) {} catch {}
+    try dividendTrackerByBUSD.setBalance(payable(from), balanceOf(from)) {} catch {}
+    try dividendTrackerByBUSD.setBalance(payable(to), balanceOf(to)) {} catch {}
 
     if (!swapping) {
       uint256 gas = gasForProcessing;
@@ -3001,13 +3016,19 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
     }
   }
 
-  function swapAndSendToFee(uint256 tokens, address receiver) private {
-    uint256 initialETHBalance = IERC20(WETH).balanceOf(address(this));
+  function swapAndSendToFee(uint256 tokens, address receiver) public {
+    uint256 initialETHBalance = address(this).balance;
 
     swapTokensForEth(tokens);
-    uint256 newBalance = (IERC20(WETH).balanceOf(address(this))).sub(initialETHBalance);
-    IERC20(WETH).transfer(receiver, newBalance);
+    uint256 newBalance = (address(this).balance).sub(initialETHBalance);
+
+    (bool success,) = address(receiver).call{value: newBalance}("");
+
+    if (success) {
+      emit SendBNBFee(tokens, newBalance);
+    }
   }
+
 
   function swapAndLiquify(uint256 tokens) private {
     // split the contract balance into halves
@@ -3050,11 +3071,11 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
     );
   }
 
-  function swapTokensForCake(uint256 tokenAmount) private {
+  function swapTokensForCake(uint256 tokenAmount, address _rewardToken) private {
     address[] memory path = new address[](3);
     path[0] = address(this);
     path[1] = uniswapV2Router.WETH();
-    path[2] = rewardToken;
+    path[2] = _rewardToken;
 
     _approve(address(this), address(uniswapV2Router), tokenAmount);
 
@@ -3084,7 +3105,7 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
   }
 
   function swapAndSendDividends(uint256 tokens) private {
-    swapTokensForCake(tokens);
+    swapTokensForCake(tokens, rewardToken);
     uint256 dividends = IERC20(rewardToken).balanceOf(address(this));
     bool success = IERC20(rewardToken).transfer(address(dividendTracker), dividends);
 
@@ -3094,14 +3115,15 @@ contract RewardCycleToken is ERC20Upgradeable, OwnableUpgradeable, IRewardCycleT
     }
   }
 
-  function swapAndSendDividendsByEth(uint256 tokens) private {
-    swapTokensForEth(tokens);
-    uint256 dividends = IERC20(WETH).balanceOf(address(this));
-    bool success = IERC20(WETH).transfer(address(dividendTrackerByEth), dividends);
+  function swapAndSendDividendsByBUSD(uint256 tokens) private {
+    swapTokensForCake(tokens, BUSD);
+    uint256 dividends = IERC20(BUSD).balanceOf(address(this));
+
+    bool success = IERC20(BUSD).transfer(address(dividendTrackerByBUSD), dividends);
 
     if (success) {
-      dividendTrackerByEth.distributeCAKEDividends(dividends);
-      emit SendDividendsByEth(tokens, dividends);
+      dividendTrackerByBUSD.distributeCAKEDividends(dividends);
+      emit SendDividendsByBUSD(tokens, dividends);
     }
   }
 }
@@ -3135,6 +3157,7 @@ contract RewardCycleDividendTracker is OwnableUpgradeable, DividendPayingToken {
       "DIVIDEND_TRACKER",
       "DIVIDEND_TRACKER"
     );
+
     claimWait = 3600;
     minimumTokenBalanceForDividends = minimumTokenBalanceForDividends_;
   }
